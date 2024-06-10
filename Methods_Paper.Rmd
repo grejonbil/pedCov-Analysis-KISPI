@@ -1,0 +1,2441 @@
+---
+title: "Spatial Analysis in children referals"
+author: "Gregory Biland, Oliver Grübner, Michael von Rhein"
+output:
+  html_document:
+    highlight: textmate
+    number_sections: true
+    theme: journal
+    toc: true
+    toc_float: true
+  word_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(dplyr)
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(spdep)
+library(readxl)
+library(classInt)
+library(stats)
+library(ggspatial)
+library(tmap)
+library(MASS)
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+Zurich <- st_read("Data/Data_Zurich/Data_Zurich_PLZ_UC.gpkg")
+Bellinzona <- st_read("Data/Data_Bellinzona/Data_Bellinzona_PLZ_UC.gpkg")
+Geneva <- st_read("Data/Data_Geneva/Data_Geneva_PLZ_UC.gpkg")
+
+Zurich_Distance <- read_csv("Data/Data_Zurich/Zurich_Distances.csv")
+Geneva_Distance <- read_csv("Data/Data_Geneva/Geneva_Distances.csv")
+Bellinzona_Distance <- read_csv("Data/Data_Bellinzona/Bellinzona_Distances.csv")
+
+# Load Canton and ZIP code borders
+canton_borders <- st_read("Data/Geodaten/Kantonsgrenzen/Kantonsgrenzen.shp")
+zipcode_borders <- st_read("Data/Geodaten/PLZ/PLZ.geojson")
+traffic_areas <- st_read("Data/Geodaten/Verkehrszonen_Schweiz_NPVM_2017/Verkehrszonen_Schweiz_NPVM_2017.gpkg")
+lakes <- st_read("Data/Geodaten/aqua.shp")
+
+# Remove rows with NA values
+Zurich <- na.omit(Zurich)%>% 
+  mutate(ID = row_number()) %>% filter(Age <= 18)
+Bellinzona <- na.omit(Bellinzona)%>% 
+  mutate(ID = row_number()) %>% filter(Age <= 18)
+Geneva <- na.omit(Geneva) %>% 
+  mutate(ID = row_number()) %>% filter(Age <= 18)
+
+## Cordinates Hospitals
+
+zurich_coords <- c(2684474.6, 1247415.3)
+bellinzona_coords <- c(2722573.5, 1115952.8)
+geneva_coords <- c(2500343.9, 1116296.7)
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Convert zipcode_borders sf object to data frame and remove geometry column
+zipcode_borders_df <- st_set_geometry(zipcode_borders, NULL) %>% as.data.frame()
+
+# Perform left joins
+Zurich_joined <- Zurich_Distance %>%
+  left_join(zipcode_borders_df, by = c("Zipcode" = "PLZ")) %>% drop_na(Distance, Sum)
+
+Bellinzona_joined <- Bellinzona_Distance %>%
+  left_join(zipcode_borders_df, by = c("Zipcode" = "PLZ")) %>% drop_na(Distance, Sum)
+
+Geneva_joined <- Geneva_Distance %>%
+  left_join(zipcode_borders_df, by = c("Zipcode" = "PLZ")) %>% drop_na(Distance, Sum)
+
+write_csv(Zurich_joined, "Data/Data_Zurich/Zurich_joined.csv")
+write_csv(Bellinzona_joined, "Data/Data_Bellinzona/Bellinzona_joined.csv")
+write_csv(Geneva_joined, "Data/Data_Geneva/Geneva_joined.csv")
+
+```
+
+# Background
+
+During the SARS-CoV-2 pandemic, the emergency wards of the three children's hospitals in the Geneva area (French-speaking Switzerland), Bellinzona (Ticino) and Zurich (German-speaking Switzerland) were very busy. The closure, ordered by the authorities, led to a reduction of up to 35% in the number of consultations per month.
+
+This initial decrease was followed by a gradual increase in the number of cases, which returned to the initial level after about a year and even showed an increase thereafter. Against this background, we wanted to investigate the following three research questions
+
+-   Were there differences in the characterisation of the cohorts treated in the three parts of the country before, during and after the closure?
+
+-   How did the spatial distribution of children presenting and the catchment area of the three emergency departments change during the pandemic?
+
+-   Which factors were relevant for the decreasing and then increasing utilisation?
+
+# Methods
+
+This paper examines the changes in hospital visits concerning the pandemic in three periods: before the pandemic (March 1, 2018 - March 10, 2020), during the pandemic (March 11, 2020 - March 21, 2021), and after the pandemic (March 22, 2021 - March 1, 2022). 
+The children were categorized according to age (0-4, 5-12, 13-18 years) and severity (severe: categories 1-3, mild: 4-5), considering the type of admission, whether outpatient or inpatient. The distinction between cantonal and non-cantonal emergency admissions allowed a differentiated analysis of the figures to identify regional differences and whether the COVID effect differentiates between cantonal and non-cantonal areas. The analysis of travel distances for hospital visits is based on two approaches (Euclidean and distance matrix). For the Euclidean distance (km), the shortest distance was calculated between the geometric centers of the postcode areas and the locations of the hospitals in Geneva, Bellinzona, and Zurich. The second approach uses the Swiss traffic zones, for which a matrix was computed that represents the shortest driving distance (km) between each traffic zone in Switzerland on the Swiss road network. The distances used in this paper are capped at 60km in each case - greater distances were treated as outliers and therefore not included in the analysis. To analyze changes in distances over three time periods, the distances above and below the median of each city were compared to the pre-pandemic period. The median for the first time period was taken and the distribution was calculated, which means finding the proportion of distances above and below this median for all three time periods based on the median of the pre-pandemic period.
+Kolmogorov-Smirnov tests were used to statistically analyze the distance variations over three periods to determine significant differences in travel distances. To further identify trends, the mean travel distance was calculated for each hospital location and period for comparison. 
+A Poisson regression model was used to determine the influence of variables such as age, gender, and triage category on hospital visits. This was done for each period, hospital, and all three hospitals and periods.
+
+# Results
+
+## Differences in the characterization of the cohorts
+
+### Variable Distribution
+
+```{r}
+
+plotDistributions <- function(data, city_name, normalisation_before, normalisation_during, normalisation_after) {
+  
+  # Group TriageCategory into two levels
+  data$TriageGroup <- ifelse(data$TriageCategory %in% 1:3, "Severe", "Light")
+  
+  # Create separate datasets for before, during, and after the pandemic
+  data_before <- data[data$Date < as.Date("2020-03-11"), ]
+  data_during <- data[data$Date >= as.Date("2020-03-11") & data$Date < as.Date("2021-03-22"), ]
+  data_after <- data[data$Date >= as.Date("2021-03-22"), ]
+
+  # Plot for Age (Age)
+  p1_before <- ggplot(data_before, aes(x = Age)) +
+    geom_histogram(aes(y = stat(count / normalisation_before)), binwidth = 1, fill = "#88CCEE", color = "black") +
+    labs(title = paste("Before Pandemic"),
+         x = "Age", y = "Normalized Count") +
+      ylim(0, 1500) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+
+  p1_during <- ggplot(data_during, aes(x = Age)) +
+    geom_histogram(aes(y = stat(count / normalisation_during)), binwidth = 1, fill = "#CC6677", color = "black") +
+    labs(title = paste("During Pandemic"),
+         x = "Age", y = "Normalized Count") +
+      ylim(0, 1500) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+  
+  p1_after <- ggplot(data_after, aes(x = Age)) +
+    geom_histogram(aes(y = stat(count / normalisation_after)), binwidth = 1, fill = "#117733", color = "black") +
+    labs(title = paste("After Pandemic"),
+         x = "Age", y = "Normalized Count") +
+      ylim(0, 1500) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+
+  # Plot for Age Groups
+  data_before$AgeGroup <- cut(data_before$Age, breaks = c(0, 4, 12, 18), labels = c("0-4", "5-12", "13-18"))
+  data_during$AgeGroup <- cut(data_during$Age, breaks = c(0, 4, 12, 18), labels = c("0-4", "5-12", "13-18"))
+  data_after$AgeGroup <- cut(data_after$Age, breaks = c(0, 4, 12, 18), labels = c("0-4", "5-12", "13-18"))
+
+  p2_before <- ggplot(data_before, aes(x = AgeGroup)) +
+    geom_bar(aes(y = stat(count / normalisation_before)), fill = "#88CCEE", color = "black") +
+    labs(title = paste("Before Pandemic"),
+         x = "Age Group", y = "Normalized Count") +
+      ylim(0, 2500) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+  
+  p2_during <- ggplot(data_during, aes(x = AgeGroup)) +
+    geom_bar(aes(y = stat(count / normalisation_during)), fill = "#CC6677", color = "black") +
+    labs(title = paste("During Pandemic"),
+         x = "Age Group", y = "Normalized Count") +
+      ylim(0, 2500) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+
+  p2_after <- ggplot(data_after, aes(x = AgeGroup)) +
+    geom_bar(aes(y = stat(count / normalisation_after)), fill = "#117733", color = "black") +
+    labs(title = paste("After Pandemic"),
+         x = "Age Group", y = "Normalized Count") +
+      ylim(0, 2500) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+
+  # Plot for TriageCategory
+  p3_before <- ggplot(data_before, aes(x = TriageCategory)) +
+    geom_bar(aes(y = stat(count / normalisation_before)), fill = "#88CCEE", color = "black") +
+    labs(title = paste("Before Pandemic"),
+         x = "Triage category", y = "Normalized Count") +
+      ylim(0, 2000) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+  
+  p3_during <- ggplot(data_during, aes(x = TriageCategory)) +
+    geom_bar(aes(y = stat(count / normalisation_during)), fill = "#CC6677", color = "black") +
+    labs(title = paste("During Pandemic"),
+         x = "Triage category", y = "Normalized Count") +
+      ylim(0, 2000) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+  
+  p3_after <- ggplot(data_after, aes(x = TriageCategory)) +
+    geom_bar(aes(y = stat(count / normalisation_after)), fill = "#117733", color = "black") +
+    labs(title = paste("After Pandemic"),
+         x = "Triage category", y = "Normalized Count") +
+      ylim(0, 2000) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+
+  # Plot for TriageGroup (Severity)
+  p4_before <- ggplot(data_before, aes(x = TriageGroup)) +
+    geom_bar(aes(y = stat(count / normalisation_before)), fill = "#88CCEE", color = "black") +
+    labs(title = paste("Before Pandemic"),
+         x = "Severity", y = "Normalized Count") +
+      ylim(0, 2500) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+
+  p4_during <- ggplot(data_during, aes(x = TriageGroup)) +
+    geom_bar(aes(y = stat(count / normalisation_during)), fill = "#CC6677", color = "black") +
+    labs(title = paste("During Pandemic"),
+         x = "Severity", y = "Normalized Count") +
+      ylim(0, 2500) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+  
+  p4_after <- ggplot(data_after, aes(x = TriageGroup)) +
+    geom_bar(aes(y = stat(count / normalisation_after)), fill = "#117733", color = "black") +
+    labs(title = paste("After Pandemic"),
+         x = "Severity", y = "Normalized Count") +
+    theme_minimal() +
+      ylim(0, 2500) +
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+
+  # Combine the plots using grid.arrange
+  age_distribution <- grid.arrange(p1_before, p1_during, p1_after,ncol = 3,
+                                   top = textGrob(paste(city_name, "Age Distribution"), 
+                                                  gp = gpar(fontsize = 16)))
+  
+  age_group_distribution <- grid.arrange(p2_before, p2_during, p2_after, ncol = 3,
+                                         top = textGrob(paste(city_name, "Age Group Distribution"), 
+                                                        gp = gpar(fontsize = 16)))
+  
+  triage_distribution <- grid.arrange(p3_before, p3_during, p3_after, ncol = 3,
+                                         top = textGrob(paste(city_name, "Triage Distribution"), 
+                                                        gp = gpar(fontsize = 16)))
+  
+  triage_severity_distribution <- grid.arrange(p4_before, p4_during, p4_after, ncol = 3,
+                                         top = textGrob(paste(city_name, "Triage Severity Distribution"), 
+                                                        gp = gpar(fontsize = 16)))
+  
+  return(list(age_distribution = age_distribution, 
+              age_group_distribution = age_group_distribution,
+              triage_distribution = triage_distribution,
+              triage_severity_distribution = triage_severity_distribution))
+}
+
+normalisation_before <- 24.32
+normalisation_during <- 12.35
+normalisation_after <- 11.21
+
+zurich_plots <- plotDistributions(Zurich, "Zurich", normalisation_before, normalisation_during, normalisation_after)
+bellinzona_plots <- plotDistributions(Bellinzona, "Bellinzona", normalisation_before, normalisation_during, normalisation_after)
+geneva_plots <- plotDistributions(Geneva, "Geneva", normalisation_before, normalisation_during, normalisation_after)
+
+
+```
+
+### Hospitalization Rates
+
+```{r}
+TypeDistributions <- function(data, city_name) {
+  # Split data based on time periods
+  df_before <- data[data$Date < as.Date("2020-03-11"), ]
+  df_during <- data[data$Date >= as.Date("2020-03-11") & data$Date < as.Date("2021-03-22"), ]
+  df_after <- data[data$Date >= as.Date("2021-03-22"), ]
+
+  # Plotting function
+  make_plot <- function(data,title_color, normalisation, title) {
+    ggplot(data, aes(x = Type)) +
+      geom_bar(aes(y = stat(count / normalisation)), fill = title_color, color = "black") +
+      labs(title = title,
+           x = "Type", y = "Normalized Count") +
+      ylim(0, 3500) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+  }
+  
+  # Create plots for each period
+  title_before <- "Before Pandemic"
+  title_during <- "During Pandemic"
+  title_after <- "After Pandemic"
+
+  # Create plots using specified colors
+  plot_before <- make_plot(df_before, "#88CCEE", 24.32, title_before)
+  plot_during <- make_plot(df_during, "#CC6677", 12.35, title_during)
+  plot_after <- make_plot(df_after, "#117733", 11.21, title_after)
+
+  # Combine plots
+  combined_plot <- grid.arrange(plot_before, plot_during, plot_after, ncol = 3,
+                                         top = textGrob(paste(city_name, "Hospitalization Type Distribution"), 
+                                                        gp = gpar(fontsize = 16)))
+
+  return(combined_plot)
+}
+
+# Apply the function for each city
+TypeDistributions(Geneva, "Geneva")
+TypeDistributions(Zurich, "Zurich")
+TypeDistributions(Bellinzona, "Bellinzona")
+```
+
+### Cantonal Visitations
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+plotVisitationsByCanton <- function(data, canton, city_name) {
+  # Separate data into three periods
+  data_before <- data[data$Date < as.Date("2020-03-11"), ]
+  data_during <- data[data$Date >= as.Date("2020-03-11") & data$Date < as.Date("2021-03-22"), ]
+  data_after <- data[data$Date >= as.Date("2021-03-22"), ]
+  
+  # Count Visitations by canton
+  count_kanton <- function(df, canton) {
+    kanton_count <- sum(df$Canton == canton, na.rm = TRUE)
+    other_count <- nrow(df) - kanton_count
+    return(data.frame(Canton = factor(c("Other", canton), levels = c("Other", canton)), 
+                      Count = c(other_count, kanton_count)))
+  }
+
+  # Calculate counts for each period
+  counts_before <- count_kanton(data_before, canton)
+  counts_during <- count_kanton(data_during, canton)
+  counts_after <- count_kanton(data_after, canton)
+
+  # Create plots
+  plot_counts <- function(counts, normalisation, title) {
+    ggplot(counts, aes(x = Canton, y = Count/normalisation, fill = Canton)) +
+      geom_bar(stat = "identity") +
+      scale_fill_manual(values = setNames(c("#88CCEE", "#CC6677"), c("Other", canton))) +
+      labs(title = title, x = "Canton", y = "Normalized Count") +
+      theme_minimal() +
+      ylim(0, 3500) +
+      theme(legend.position = "none",
+            plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+            axis.title.x = element_text(size = 8), 
+            axis.title.y = element_text(size = 8)
+      )
+  }
+
+  # Create plots for each period
+  title_before <- "Before Pandemic"
+  title_during <- "During Pandemic"
+  title_after <- "After Pandemic"
+  
+  plot_before <- plot_counts(counts_before, 24.32, title_before)
+  plot_during <- plot_counts(counts_during, 12.35, title_during)
+  plot_after <- plot_counts(counts_after, 11.21, title_after)
+  
+  # Combine the plots side by side using grid.arrange from gridExtra package
+  combined_plot <- gridExtra::grid.arrange(plot_before, plot_during, plot_after, ncol = 3,
+                                         top = textGrob(paste(city_name, "Cantonal Visitation Distribution"), 
+                                                        gp = gpar(fontsize = 16)))
+  
+  return(combined_plot)
+}
+
+# Test with sample data frames and kanton. 
+# Make sure Zurich data frame is correctly defined and loaded before running this.
+plotVisitationsByCanton(Zurich, "ZH", "Zurich")
+plotVisitationsByCanton(Bellinzona, "TI", "Bellinzona")  
+plotVisitationsByCanton(Geneva, "GE", "Geneva")
+
+
+```
+
+### Distance Computation
+
+#### Calculated Distances (Euclidean)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+calculateMinDistances <- function(data, coords) {
+  # Separate data into three periods
+  data_before <- data[data$Date < as.Date("2020-03-11"), ]
+  data_during <- data[data$Date >= as.Date("2020-03-11") & data$Date < as.Date("2021-03-22"), ]
+  data_after <- data[data$Date >= as.Date("2021-03-22"), ]
+  
+  # Internal function to calculate distances
+  calcDist <- function(df, coords) {
+    hospital <- st_sfc(st_point(coords), crs = st_crs(df))
+    distances <- st_distance(df, hospital)
+    distances <- as.vector(matrix(distances, ncol = 1))
+    return(distances[distances <= 60000])  # Filter out distances > 75km
+  }
+  
+  # Calculate distances for each period
+  distances_before <- calcDist(data_before, coords)
+  distances_during <- calcDist(data_during, coords)
+  distances_after <- calcDist(data_after, coords)
+  
+  return(list(before = distances_before, during = distances_during, after = distances_after))
+}
+
+zurich_distances <- calculateMinDistances(Zurich, zurich_coords)
+bellinzona_distances <- calculateMinDistances(Bellinzona, bellinzona_coords)
+geneva_distances <- calculateMinDistances(Geneva, geneva_coords)
+
+plotDistanceDistribution <- function(distances, city_name) {
+  # Data for each period
+  df_before <- data.frame(Distance = distances$before / 1000)  # Convert to kilometers
+  df_during <- data.frame(Distance = distances$during / 1000)  
+  df_after <- data.frame(Distance = distances$after / 1000)  
+
+  # Calculate the max count for consistent y-axis
+  max_count <- max(
+    c(
+      ggplot_build(ggplot(df_before, aes(x = Distance)) +
+                     geom_histogram(binwidth = 1))$data[[1]]$count,
+      ggplot_build(ggplot(df_during, aes(x = Distance)) +
+                     geom_histogram(binwidth = 1))$data[[1]]$count,
+      ggplot_build(ggplot(df_after, aes(x = Distance)) +
+                     geom_histogram(binwidth = 1))$data[[1]]$count
+    )
+  )
+
+  # Plot for before pandemic
+  plot_before <- ggplot(df_before, aes(x = Distance)) +
+    geom_histogram(binwidth = 1.5, fill = "#88CCEE", color = "black") +
+    labs(title = paste("Before Pandemic"),
+         x = "Distance (km)", y = "Count") +
+    ylim(0, max_count) +
+    theme_minimal()+
+    theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+
+  # Plot for during pandemic
+  plot_during <- ggplot(df_during, aes(x = Distance)) +
+    geom_histogram(binwidth = 1.5, fill = "#CC6677", color = "black") +
+    labs(title = paste("During Pandemic"),
+         x = "Distance (km)", y = "Count") +
+    ylim(0, max_count) +
+    theme_minimal()+
+    theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+
+  # Plot for after pandemic
+  plot_after <- ggplot(df_after, aes(x = Distance)) +
+    geom_histogram(binwidth = 1.5, fill = "#117733", color = "black") +
+    labs(title = paste("After Pandemic"),
+         x = "Distance (km)", y = "Count") +
+    ylim(0, max_count) +
+    theme_minimal()+
+    theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+
+  # Combine the plots side by side using grid.arrange
+  combined_plot <- grid.arrange(plot_before, plot_during, plot_after, ncol = 3,
+                                         top = textGrob(paste(city_name, "Distance Distribution"), 
+                                                        gp = gpar(fontsize = 16)))
+
+  return(combined_plot)
+}
+
+
+# Generate the plots for each city
+zurich_plot <- plotDistanceDistribution(zurich_distances, "Zurich")
+bellinzona_plot <- plotDistanceDistribution(bellinzona_distances, "Bellinzona")
+geneva_plot <- plotDistanceDistribution(geneva_distances, "Geneva")
+
+print(zurich_plot)
+print(bellinzona_plot)
+print(geneva_plot)
+
+```
+
+#### Calculated Distances (Matrix)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+plotDistanceDistribution <- function(data, city_name) {
+  # Filter out distances greater than 60km
+  data <- data[data$Distance <= 60, ]
+
+  # Split data based on time periods
+  df_before <- data[data$Date < as.Date("2020-03-11"), ]
+  df_during <- data[data$Date >= as.Date("2020-03-11") & data$Date < as.Date("2021-03-22"), ]
+  df_after <- data[data$Date >= as.Date("2021-03-22"), ]
+
+  # Plotting function
+  make_plot <- function(data,title_color, normalisation, title) {
+    ggplot(data, aes(x = Distance)) +
+      geom_histogram(aes(y = stat(count / normalisation)), binwidth = 2, fill = title_color, color = "black") +
+      labs(title = title,
+           x = "Distance (km)", y = "Normalized Count") +
+      ylim(0, 750) +
+      theme_minimal()+
+      theme(
+      plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8)
+    )
+  }
+  
+  # Create plots for each period
+  title_before <- "Before Pandemic"
+  title_during <- "During Pandemic"
+  title_after <- "After Pandemic"
+
+  # Create plots using specified colors
+  plot_before <- make_plot(df_before, "#88CCEE", 24.32, title_before)
+  plot_during <- make_plot(df_during, "#CC6677", 12.35, title_during)
+  plot_after <- make_plot(df_after, "#117733", 11.21, title_after)
+
+  # Combine plots
+  combined_plot <- grid.arrange(plot_before, plot_during, plot_after, ncol = 3,
+                                         top = textGrob(paste(city_name, "Distance Distribution"), 
+                                                        gp = gpar(fontsize = 16)))
+
+  return(combined_plot)
+}
+
+# Apply the function for each city
+plotDistanceDistribution(Geneva_Distance, "Geneva")
+plotDistanceDistribution(Zurich_Distance, "Zurich")
+plotDistanceDistribution(Bellinzona_Distance, "Bellinzona")
+
+
+```
+
+##### Median Distance Split
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+plotDistanceDistribution <- function(data, city_name) {
+
+  # Split data based on time periods
+  df_before <- data[data$Date < as.Date("2020-03-11"), ]
+  df_during <- data[data$Date >= as.Date("2020-03-11") & data$Date < as.Date("2021-03-22"), ]
+  df_after <- data[data$Date >= as.Date("2021-03-22"), ]
+  
+  # Calculate the median from the 'before' period
+  median_before <- median(df_before$Distance)
+  
+  df_before <- df_before[df_before$Distance <= 60, ]
+  df_during <- df_during[df_during$Distance <= 60, ]
+  df_after <- df_after[df_after$Distance <= 60, ]
+  
+  # Label distances as 'Below' or 'Above' based on the median
+  label_distance <- function(distance) {
+    factor(ifelse(distance <= median_before, "Below", "Above"), 
+           levels = c("Below", "Above"))
+  }
+  
+  df_before$Proximity <- sapply(df_before$Distance, label_distance)
+  df_during$Proximity <- sapply(df_during$Distance, label_distance)
+  df_after$Proximity <- sapply(df_after$Distance, label_distance)
+  
+  # Maximum y-axis value for consistent plotting
+  max_Proximity <- max(
+    max(table(df_before$Proximity)),
+    max(table(df_during$Proximity)),
+    max(table(df_after$Proximity))
+  )
+
+  # Plotting function
+  make_plot <- function(data,title_color, normalisation,title) {
+    ggplot(data, aes(x = Proximity, fill = Proximity)) +
+      geom_bar(aes(y = stat(count / normalisation)), color = "black") +
+      scale_fill_manual(values = c("Below" = "#88CCEE", "Above" = "#CC6677")) +
+      labs(title = title,
+           x = "Proximity", y = "Normalized Count") +
+      theme_minimal() +
+      ylim(0, 2000) +
+      theme(legend.position = "none",
+            plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+            axis.title.x = element_text(size = 8), 
+            axis.title.y = element_text(size = 8)
+      ) # hjust = 0.5 centers the title
+  }
+  
+  # Create plots for each period
+  title_before <- "Before Pandemic"
+  title_during <- "During Pandemic"
+  title_after <- "After Pandemic"
+
+  # Create plots using specified colors
+  plot_before <- make_plot(df_before, "#88CCEE", 24.32, title_before)
+  plot_during <- make_plot(df_during, "#CC6677", 12.35, title_during)
+  plot_after <- make_plot(df_after, "#117733", 11.21, title_after)
+
+  # Print the median
+  print(paste("The median for", city_name ,"is:", median_before))
+  
+  # Combine plots
+  combined_plot <- grid.arrange(plot_before, plot_during, plot_after, ncol = 3,
+                                         top = textGrob(paste(city_name, "Median Distance Split Distribution"), 
+                                                        gp = gpar(fontsize = 16)))
+
+  return(combined_plot)
+}
+
+# Apply the function for each city
+plotDistanceDistribution(Geneva_joined, "Geneva")
+plotDistanceDistribution(Zurich_joined, "Zurich")
+plotDistanceDistribution(Bellinzona_joined, "Bellinzona")
+
+```
+
+```{r}
+plotDistanceByCanton <- function(data, kanton, city_name) {
+  # Separate data into three periods
+  data <- data[data$Distance <= 60, ]
+  data_before <- data[data$Date < as.Date("2020-03-11"), ]
+  data_during <- data[data$Date >= as.Date("2020-03-11") & data$Date < as.Date("2021-03-22"), ]
+  data_after <- data[data$Date >= as.Date("2021-03-22"), ]
+  
+  # Categorize distance by kanton and others
+  categorize_kanton <- function(df, kanton) {
+    df$Category <- factor(ifelse(df$Canton == kanton, kanton, "Other"), levels = c("Other", kanton))
+    return(df)
+  }
+
+  data_before <- categorize_kanton(data_before, kanton)
+  data_during <- categorize_kanton(data_during, kanton)
+  data_after <- categorize_kanton(data_after, kanton)
+  
+  # Plotting function for boxplots
+  plot_distance <- function(df, title) {
+    ggplot(df, aes(x = Category, y = Distance, fill = Category)) +
+      stat_boxplot() +
+      scale_fill_manual(values = setNames(c("#88CCEE", "#CC6677"), c("Other", kanton))) +
+      labs(x = "Canton", y = "Distance [km]", title = title) +
+      theme_minimal() +
+      theme(legend.position = "none",
+            plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+            axis.title.x = element_text(size = 8), 
+            axis.title.y = element_text(size = 8)
+      )
+  }
+  
+    # Create plots for each period
+  title_before <- "Before Pandemic"
+  title_during <- "During Pandemic"
+  title_after <- "After Pandemic"
+  
+  # Create boxplots for each period
+  plot_before <- plot_distance(data_before, title_before)
+  plot_during <- plot_distance(data_during, title_during)
+  plot_after <- plot_distance(data_after, title_after)
+  
+  # Combine the plots side by side
+  combined_plot <- grid.arrange(plot_before, plot_during, plot_after, ncol = 3,
+                                         top = textGrob(paste(city_name, "Cantonal Distance Distribution"), 
+                                                        gp = gpar(fontsize = 16)))
+  
+  return(combined_plot)
+}
+
+# Test with sample data frames and kanton. 
+zurich_plot <- plotDistanceByCanton(Zurich_joined, "ZH", "Zurich")
+bellinzona_plot <- plotDistanceByCanton(Bellinzona_joined, "TI", "Bellinzona")  
+geneva_plot <- plotDistanceByCanton(Geneva_joined, "GE", "Geneva")
+
+```
+```{r}
+plotDistance <- function(data, city_name) {
+  # Filter data for distance less than or equal to 60
+  data <- data[data$Distance <= 60, ]
+  
+  # Separate data into three periods
+  data_before <- data[data$Date < as.Date("2020-03-11"), ]
+  data_during <- data[data$Date >= as.Date("2020-03-11") & data$Date < as.Date("2021-03-22"), ]
+  data_after <- data[data$Date >= as.Date("2021-03-22"), ]
+
+  # Add a dummy x-axis variable for boxplot
+  data_before$x <- 1
+  data_during$x <- 1
+  data_after$x <- 1
+
+  # Plotting function for boxplots
+  plot_distance <- function(df, title_color, title) {
+    ggplot(df, aes(x = x, y = Distance)) +
+      geom_boxplot(fill = title_color) +
+      labs(y = "Distance [km]", title = title) +
+      theme_minimal() +
+      theme(legend.position = "none",
+            plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+            axis.title.x = element_blank(), 
+            axis.title.y = element_text(size = 8),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank()
+      )
+  }
+
+  # Create plots for each period
+  title_before <- "Before Pandemic"
+  title_during <- "During Pandemic"
+  title_after <- "After Pandemic"
+  
+  # Create boxplots for each period
+  plot_before <- plot_distance(data_before, "#88CCEE", title_before)
+  plot_during <- plot_distance(data_during, "#CC6677", title_during)
+  plot_after <- plot_distance(data_after, "#117733", title_after)
+  
+  # Combine the plots side by side
+  combined_plot <- grid.arrange(plot_before, plot_during, plot_after, ncol = 3,
+                                         top = textGrob(paste(city_name, "Distance Distribution"), 
+                                                        gp = gpar(fontsize = 16)))
+  
+  return(combined_plot)
+}
+
+# Test with sample data frames and kanton. 
+plotDistance(Zurich_joined, "Zurich")
+plotDistance(Bellinzona_joined, "Bellinzona")  
+plotDistance(Geneva_joined, "Geneva")
+
+```
+
+### Statistical Distance Analysis
+
+#### Distance Kolmogorov-Smirnov-Test
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+calculateDistancesByPeriod <- function(data) {
+  data_before <- data[data$Date < as.Date("2020-03-11"), ]
+  data_during <- data[data$Date >= as.Date("2020-03-11") & data$Date < as.Date("2021-03-22"), ]
+  data_after <- data[data$Date >= as.Date("2021-03-22"), ]
+  
+  # Extract distances from the Distance column
+  distances_before <- data_before$Distance
+  distances_during <- data_during$Distance
+  distances_after <- data_after$Distance
+  
+  return(list(before = distances_before, during = distances_during, after = distances_after))
+}
+
+performKSTestsAndAnalyzeChanges <- function(city_name, data) {
+  # Calculate distances for each period
+  distances <- calculateDistancesByPeriod(data)
+
+  print(paste("The results for the KS test for", city_name, "are:"))
+
+  # Perform the KS tests between the different periods
+  comparisons <- list(
+    "Before vs During" = ks.test(distances$before, distances$during),
+    "During vs After" = ks.test(distances$during, distances$after)
+  )
+
+  # Print the KS test results
+  lapply(names(comparisons), function(comp_name) {
+    cat(comp_name, "\n")
+    print(comparisons[[comp_name]])
+  })
+
+  cat("\nThe direction of change in mean distances for", city_name, "are:\n")
+  
+  # Calculate mean distances for each period
+  mean_before <- mean(distances$before, na.rm = TRUE)
+  mean_during <- mean(distances$during, na.rm = TRUE)
+  mean_after <- mean(distances$after, na.rm = TRUE)
+  
+  cat("Before: ", mean_before, "\n")
+  cat("During: ", mean_during, "\n")
+  cat("After: ", mean_after, "\n\n")
+
+  # Analyze the direction of change
+  analyzeChange <- function(prev_period, next_period) {
+    if (next_period > prev_period) return("Increase")
+    else if (next_period < prev_period) return("Decrease")
+    else return("No Change")
+  }
+  
+  cat("Change Before to During: ", analyzeChange(mean_before, mean_during), "\n")
+  cat("Change During to After: ", analyzeChange(mean_during, mean_after), "\n")
+}
+
+# Sample usage with sample data frames and city names.
+performKSTestsAndAnalyzeChanges("Zurich", Zurich_joined)
+performKSTestsAndAnalyzeChanges("Geneva", Geneva_joined)
+performKSTestsAndAnalyzeChanges("Bellinzona", Bellinzona_joined)
+
+
+
+```
+
+#### Distance K- Test by Canton
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+calculateDistancesByPeriod <- function(data) {
+  data_before <- data[data$Date < as.Date("2020-03-11"), ]
+  data_during <- data[data$Date >= as.Date("2020-03-11") & data$Date < as.Date("2021-03-22"), ]
+  data_after <- data[data$Date >= as.Date("2021-03-22"), ]
+  
+  # Extract distances from the Distance column
+  distances_before <- data_before$Distance
+  distances_during <- data_during$Distance
+  distances_after <- data_after$Distance
+  
+  return(list(before = distances_before, during = distances_during, after = distances_after))
+}
+
+calculateMinDistancesByCanton <- function(data, kanton) {
+  # Filter data by kanton and other
+  data_kanton <- data[data$Canton == kanton, ]
+  data_other <- data[data$Canton != kanton, ]
+  
+  # Utilize existing calculateMinDistances function
+  distances_kanton <- calculateDistancesByPeriod(data_kanton)
+  distances_other <- calculateDistancesByPeriod(data_other)
+  
+  return(list(kanton = distances_kanton, other = distances_other))
+}
+
+distances_ZH <- calculateMinDistancesByCanton(Zurich_joined, "ZH")
+distances_GE <- calculateMinDistancesByCanton(Geneva_joined, "GE")
+distances_TI <- calculateMinDistancesByCanton(Bellinzona_joined, "TI")
+
+
+performKSTestsAndAnalyzeChanges <- function(city_name, data) {
+
+  print(paste("The results for the KS test for", city_name, "are:"))
+
+  # Perform the KS tests between the different periods
+  comparisons <- list(
+    "Before vs During" = ks.test(data$before, data$during),
+    "During vs After" = ks.test(data$during, data$after)
+  )
+
+  # Print the KS test results
+  lapply(names(comparisons), function(comp_name) {
+    cat(comp_name, "\n")
+    print(comparisons[[comp_name]])
+  })
+
+  cat("\nThe direction of change in mean distances for", city_name, "are:\n")
+  
+  # Calculate mean distances for each period
+  mean_before <- mean(data$before, na.rm = TRUE)
+  mean_during <- mean(data$during, na.rm = TRUE)
+  mean_after <- mean(data$after, na.rm = TRUE)
+  
+  cat("Before: ", mean_before, "\n")
+  cat("During: ", mean_during, "\n")
+  cat("After: ", mean_after, "\n\n")
+
+  # Analyze the direction of change
+  analyzeChange <- function(prev_period, next_period) {
+    if (next_period > prev_period) return("Increase")
+    else if (next_period < prev_period) return("Decrease")
+    else return("No Change")
+  }
+  
+  cat("Change Before to During: ", analyzeChange(mean_before, mean_during), "\n")
+  cat("Change During to After: ", analyzeChange(mean_during, mean_after), "\n")
+}
+
+cat("Analysis for", "ZH", "in", "Zurich", "\n")
+performKSTestsAndAnalyzeChanges(paste("Zurich", "ZH"), distances_ZH$kanton)
+cat("Analysis for", "Other", "in", "Zurich", "\n")
+performKSTestsAndAnalyzeChanges(paste("Zurich", "ZH"), distances_ZH$other)
+
+cat("Analysis for", "GE", "in", "Geneva", "\n")
+performKSTestsAndAnalyzeChanges(paste("Geneva", "ZH"), distances_GE$kanton)
+cat("Analysis for", "Other", "in", "Geneva", "\n")
+performKSTestsAndAnalyzeChanges(paste("Geneva", "ZH"), distances_GE$other)
+
+cat("Analysis for", "TI", "in", "Bellinzona", "\n")
+performKSTestsAndAnalyzeChanges(paste("Bellinzona", "ZH"), distances_TI$kanton)
+cat("Analysis for", "Other", "in", "Bellinzona", "\n")
+performKSTestsAndAnalyzeChanges(paste("Bellinzona", "ZH"), distances_TI$other)
+
+
+
+```
+##### Mean Travel Distances by Period
+
+```{r}
+calculate_distance_metrics <- function(data_zurich, data_geneva, data_bellinzona) {
+  # Helper function to calculate mean distance
+  calculate_mean_distance <- function(period_data) {
+    mean(period_data$Distance, na.rm = TRUE)
+  }
+
+  # Helper function to calculate percentage change
+  calculate_percentage_change <- function(rate1, rate2) {
+    ((rate2 - rate1) / rate1) * 100
+  }
+
+  # Helper function to process each city's data
+  process_city_data <- function(city_data) {
+    before <- city_data[city_data$Date < as.Date("2020-03-11"), ]
+    during <- city_data[city_data$Date >= as.Date("2020-03-11") & city_data$Date < as.Date("2021-03-22"), ]
+    after <- city_data[city_data$Date >= as.Date("2021-03-22"), ]
+
+    mean_before <- calculate_mean_distance(before)
+    mean_during <- calculate_mean_distance(during)
+    mean_after <- calculate_mean_distance(after)
+
+    percentage_change_before_during <- calculate_percentage_change(mean_before, mean_during)
+    percentage_change_during_after <- calculate_percentage_change(mean_during, mean_after)
+    percentage_change_before_after <- calculate_percentage_change(mean_before, mean_after)
+
+    list(
+      MeanDistance = list(Before = mean_before, During = mean_during, After = mean_after),
+      PercentageChangeDistance = list(
+        Before_During = percentage_change_before_during,
+        During_After = percentage_change_during_after,
+        Before_After = percentage_change_before_after
+      )
+    )
+  }
+
+  # Process each city's data
+  list(
+    Zurich = process_city_data(data_zurich),
+    Geneva = process_city_data(data_geneva),
+    Bellinzona = process_city_data(data_bellinzona)
+  )
+}
+
+# Usage example:
+result <- calculate_distance_metrics(Zurich_Distance, Geneva_Distance, Bellinzona_Distance)
+print(result)
+```
+
+## Spatial distribution
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+createBoundingBox <- function(coords) {
+  buffer <- st_buffer(st_sfc(st_point(coords), crs = 2056), dist = 60000)
+  return(st_bbox(buffer))
+}
+
+zurich_coords <- c(2684474.6, 1247415.3)
+bellinzona_coords <- c(2722573.5, 1115952.8)
+geneva_coords <- c(2500343.9, 1116296.7)
+
+zurich_sf <- st_sf(geometry = st_sfc(st_point(zurich_coords), crs = 2056))
+bellinzona_sf <- st_sf(geometry = st_sfc(st_point(bellinzona_coords), crs = 2056))
+geneva_sf <- st_sf(geometry = st_sfc(st_point(geneva_coords), crs = 2056))
+
+zurich_box <- createBoundingBox(zurich_coords)
+bellinzona_box <- createBoundingBox(bellinzona_coords)
+geneva_box <- createBoundingBox(geneva_coords)
+#geneva_box <- c(xmin = 2481228.7, ymin = 1107287.4, xmax = 2481228.7 + 80000, ymax = 1107287.4 + 80000)
+
+```
+
+### Visitation Mapping
+
+The maps show the admission rates for the three cities of Zurich, Bellinzona, and Geneva for the three respective periods. The admission rate is the percentage of children admitted as a proportion of the total number of children in a postcode. The classifications are quantiles where each of the five classes covers 20% of the complete data set.
+
+#### Visitations Zurich (ZH)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# Function to compute normalized counts, rejoin geometry, and plot
+compute_and_plot <- function(city_df, city_name, city_coords) {
+  
+  # Split data into three time periods
+  data_before <- city_df[city_df$Date < as.Date("2020-03-11"), ]
+  data_during <- city_df[city_df$Date >= as.Date("2020-03-11") & city_df$Date < as.Date("2021-03-22"), ]
+  data_after <- city_df[city_df$Date >= as.Date("2021-03-22"), ]
+  
+  # Function to prepare and compute normalized counts
+  prepare_data <- function(data) {
+    # Count the actual number of children per PLZ
+    data <- data %>%
+      group_by(Zipcode) %>%
+      summarise(n = n()) %>%
+      ungroup()
+
+    # Compute normalized counts
+    data <- data %>% 
+      left_join(zipcode_borders %>% 
+                st_drop_geometry() %>% 
+                dplyr::select(PLZ, Sum), by = c("Zipcode" = "PLZ")) %>% 
+      drop_na() %>% 
+      filter(Sum != 0) %>%
+      mutate(NormalizedCount = (n / Sum) * 100)  # Changed to count per 100 children for normalization
+    
+    return(data)
+  }
+  
+  data_before <- prepare_data(data_before)
+  data_during <- prepare_data(data_during)
+  data_after <- prepare_data(data_after)
+  
+  # Calculate max limit for this specific city across all periods
+  max_limit <- max(
+    max(data_before$NormalizedCount, na.rm = TRUE), 
+    max(data_during$NormalizedCount, na.rm = TRUE), 
+    max(data_after$NormalizedCount, na.rm = TRUE)
+  )
+
+  plot_for_period <- function(data, period_name) {
+    # Rejoin geometry
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>% 
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") 
+
+    # Plot on a map
+    tm <- tm_shape(st_crop(city_sf,zurich_box)) +
+      tm_fill(col = "NormalizedCount", style = "quantile", palette = c("#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"),
+              title = paste0(city_name," - Visitation rates [%]"), legend.reverse = TRUE, n = 5) +
+      tm_borders(col = "#cccccc", lwd = 0.1) +
+      tm_shape(st_crop(zipcode_borders, zurich_box)) +
+      tm_borders(col = "#cccccc", lwd = 0.1) +
+      tm_shape(st_crop(canton_borders, zurich_box)) +
+      tm_borders(col = "black") +
+      tm_shape(city_coords) +
+      tm_symbols(shape = 4, size = 0.3, col = "black") +
+      tm_shape(st_crop(lakes, zurich_box)) +
+      tm_fill(col = "#88CCEE") +
+      tm_borders(col = "#cccccc", lwd = 0.1) +
+      tm_layout(title = paste0(period_name),
+                frame = TRUE,
+                inner.margins = c(0.125,0.125,0.125,0.125),
+                legend.text.size = 0.6,
+                legend.title.size = 0.6,
+                legend.position = c("left","top"),
+                title.size = 0.9) +
+      tm_scale_bar(position = c("right", "bottom"), text.size = 0.5, 
+                   lwd = 0.1, color.dark = "grey2", width = 0.15)
+            
+    # Print the map
+    print(tm)
+  }
+
+  # Execute for each period
+  plot_for_period(data_before, "Visitation Rates Before Pandemic")
+  plot_for_period(data_during, "Visitation Rates During Pandemic")
+  plot_for_period(data_after, "Visitation Rates After Pandemic")
+
+}
+
+# Execute for each city
+compute_and_plot(Zurich_joined, "Zurich", zurich_sf)
+
+```
+
+#### Visitations Geneva (GE)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# Function to compute normalized counts, rejoin geometry, and plot
+compute_and_plot <- function(city_df, city_name, city_coords) {
+  
+  # Split data into three time periods
+  data_before <- city_df[city_df$Date < as.Date("2020-03-11"), ]
+  data_during <- city_df[city_df$Date >= as.Date("2020-03-11") & city_df$Date < as.Date("2021-03-22"), ]
+  data_after <- city_df[city_df$Date >= as.Date("2021-03-22"), ]
+  
+  # Function to prepare and compute normalized counts
+  prepare_data <- function(data) {
+    # Count the actual number of children per PLZ
+    data <- data %>%
+      group_by(Zipcode) %>%
+      summarise(n = n()) %>%
+      ungroup()
+
+    # Compute normalized counts
+    data <- data %>% 
+      left_join(zipcode_borders %>% 
+                st_drop_geometry() %>% 
+                dplyr::select(PLZ, Sum), by = c("Zipcode" = "PLZ")) %>% 
+      drop_na() %>% 
+      filter(Sum != 0) %>%
+      mutate(NormalizedCount = (n / Sum) * 100)  # Changed to count per 100 children for normalization
+    
+    return(data)
+  }
+  
+  data_before <- prepare_data(data_before)
+  data_during <- prepare_data(data_during)
+  data_after <- prepare_data(data_after)
+  
+  # Calculate max limit for this specific city across all periods
+  max_limit <- max(
+    max(data_before$NormalizedCount, na.rm = TRUE), 
+    max(data_during$NormalizedCount, na.rm = TRUE), 
+    max(data_after$NormalizedCount, na.rm = TRUE)
+  )
+
+  plot_for_period <- function(data, period_name) {
+    # Rejoin geometry
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>% 
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") 
+
+    # Plot on a map
+    tm <- tm_shape(st_crop(city_sf,geneva_box)) +
+      tm_fill(col = "NormalizedCount", style = "quantile", palette = c("#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"),
+              title = paste0(city_name," - Visitation rates [%]"), legend.reverse = TRUE, n = 5) +
+      tm_borders(col = "#cccccc", lwd = 0.1) +
+      tm_shape(st_crop(zipcode_borders, geneva_box)) +
+      tm_borders(col = "#cccccc", lwd = 0.1) +
+      tm_shape(st_crop(canton_borders, geneva_box)) +
+      tm_borders(col = "black") +
+      tm_shape(city_coords) +
+      tm_symbols(shape = 4, size = 0.3, col = "black") +
+      tm_shape(st_crop(lakes, geneva_box)) +
+      tm_fill(col = "#88CCEE") +
+      tm_borders(col = "#cccccc", lwd = 0.1) +
+      tm_layout(title = paste0(period_name),
+                frame = TRUE,
+                legend.text.size = 0.6,
+                legend.title.size = 0.6,
+                legend.position = c("left","top"),
+                inner.margins = c(0.125,0.125,0.125,0.125),
+                title.size = 0.9) +
+      tm_scale_bar(position = c("right", "bottom"), text.size = 0.5, lwd = 0.1, color.dark = "grey2", width = 0.15)
+      
+    # Print the map
+    print(tm)
+  }
+
+  # Execute for each period
+  plot_for_period(data_before, "Visitation Rates Before Pandemic")
+  plot_for_period(data_during, "Visitation Rates During Pandemic")
+  plot_for_period(data_after, "Visitation Rates After Pandemic")
+
+}
+
+# Execute for each city
+compute_and_plot(Geneva_joined, "Geneva",geneva_sf)
+
+```
+
+#### Visitations Ticino (TI)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# Function to compute normalized counts, rejoin geometry, and plot
+compute_and_plot <- function(city_df, city_name, city_coords) {
+  
+  # Split data into three time periods
+  data_before <- city_df[city_df$Date < as.Date("2020-03-11"), ]
+  data_during <- city_df[city_df$Date >= as.Date("2020-03-11") & city_df$Date < as.Date("2021-03-22"), ]
+  data_after <- city_df[city_df$Date >= as.Date("2021-03-22"), ]
+  
+  # Function to prepare and compute normalized counts
+  prepare_data <- function(data) {
+    # Count the actual number of children per PLZ
+    data <- data %>%
+      group_by(Zipcode) %>%
+      summarise(n = n()) %>%
+      ungroup()
+
+    # Compute normalized counts
+    data <- data %>% 
+      left_join(zipcode_borders %>% 
+                st_drop_geometry() %>% 
+                dplyr::select(PLZ, Sum), by = c("Zipcode" = "PLZ")) %>% 
+      drop_na() %>% 
+      filter(Sum != 0) %>%
+      mutate(NormalizedCount = (n / Sum) * 100)  # Changed to count per 100 children for normalization
+    
+    return(data)
+  }
+  
+  data_before <- prepare_data(data_before)
+  data_during <- prepare_data(data_during)
+  data_after <- prepare_data(data_after)
+  
+  # Calculate max limit for this specific city across all periods
+  max_limit <- max(
+    max(data_before$NormalizedCount, na.rm = TRUE), 
+    max(data_during$NormalizedCount, na.rm = TRUE), 
+    max(data_after$NormalizedCount, na.rm = TRUE)
+  )
+
+  plot_for_period <- function(data, period_name) {
+    # Rejoin geometry
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>% 
+      st_as_sf(crs = 2056) %>% 
+      st_set_geometry(., "geometry")
+    
+    city_sf <- city_sf %>% st_crop(bellinzona_box)
+    
+    # Plot on a map
+    tm <- tm_shape(city_sf) +
+      tm_fill(col = "NormalizedCount", style = "quantile", palette = c("#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"),
+              title = paste0(city_name," - Visitation rates [%]"), legend.reverse = TRUE, n = 5) +
+      tm_borders(col = "#cccccc", lwd = 0.1) +
+      tm_shape(st_crop(zipcode_borders, bellinzona_box)) +
+      tm_borders(col = "#cccccc", lwd = 0.1) +
+      tm_shape(st_crop(canton_borders, bellinzona_box)) +
+      tm_borders(col = "black") +
+      tm_shape(city_coords) +
+      tm_symbols(shape = 4, size = 0.3, col = "black") +      
+      tm_shape(st_crop(lakes, bellinzona_box)) +
+      tm_fill(col = "#88CCEE") +
+      tm_borders(col = "#cccccc", lwd = 0.1) +
+      tm_layout(title = paste0(period_name),
+                frame = TRUE,
+                legend.text.size = 0.6,
+                legend.title.size = 0.6,
+                legend.position = c(0.75,0.1),
+                inner.margins = c(0.2,0.2,0.2,0.2),
+                title.size = 0.9) +
+      tm_scale_bar(position = c("right", "bottom"), text.size = 0.5, lwd = 0.1, color.dark = "grey2", width = 0.15)
+      
+    # Print the map
+    print(tm)
+  }
+
+  # Execute for each period
+  plot_for_period(data_before, "Visitation Rates Before Pandemic")
+  plot_for_period(data_during, "Visitation Rates During Pandemic")
+  plot_for_period(data_after, "Visitation Rates After Pandemic")
+
+}
+
+# Execute for each city
+compute_and_plot(Bellinzona_joined, "Bellinzona", bellinzona_sf)
+
+```
+### Difference in Visitations Mapping (60km Distances)
+
+The following maps show the changes in the allocations for the three cities of Geneva, Bellinzona, and Zurich within 60km to each respective city. The percentage change in admission rates is compared with the period before the pandemic. Again, the five classes are quantiles, covering 20% of the value range.
+
+#### Difference Visitations Zurich (ZH)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Function to compute normalized counts
+calculate_normalized_counts <- function(data) {
+  data <- data %>%
+    group_by(Zipcode) %>%
+    summarise(n = n()) %>%
+    ungroup() %>%
+    right_join(zipcode_borders %>% 
+                 st_drop_geometry() %>% 
+                 dplyr::select(PLZ, Sum), by = c("Zipcode" = "PLZ")) %>%
+    replace_na(list(n = 0, Sum = 0)) %>%  # Added replacing NA with 0 for Sum
+    mutate(NormalizedCount = if_else(Sum == 0, 0, (n / Sum) * 100))  # handling division by zero
+  
+  print(paste("Normalized counts - Min:", min(data$NormalizedCount), "Max:", max(data$NormalizedCount)))
+  return(data)
+}
+
+# Function to calculate percentage changes
+percentage_changes <- function(before, during, after) {
+  data <- before %>%
+    dplyr::select(-n, -NormalizedCount) %>%
+    mutate(PercentageChangeDuring = (during$NormalizedCount - before$NormalizedCount),
+           PercentageChangeAfter = (after$NormalizedCount - before$NormalizedCount))
+  
+  print(paste("Percentage changes during - Min:", min(data$PercentageChangeDuring), "Max:", max(data$PercentageChangeDuring)))
+  print(paste("Percentage changes after - Min:", min(data$PercentageChangeAfter), "Max:", max(data$PercentageChangeAfter)))
+  return(data)
+}
+
+# Make sure to have the necessary data and libraries loaded before running the function
+
+# Apply the functions
+compute <- function(city_df, city_name) {
+  
+  city_df <- city_df[city_df$Distance <= 60, ]
+  # Split the data into three periods
+  data_before <- city_df[city_df$Date < as.Date("2020-03-11"), ]
+  data_during <- city_df[city_df$Date >= as.Date("2020-03-11") & city_df$Date < as.Date("2021-03-22"), ]
+  data_after <- city_df[city_df$Date >= as.Date("2021-03-22"), ]
+
+  before <- calculate_normalized_counts(data_before)
+  during <- calculate_normalized_counts(data_during)
+  after <- calculate_normalized_counts(data_after)
+
+  changes <- percentage_changes(before, during, after)
+    
+  changes <- changes %>%
+    filter(PercentageChangeDuring != 0 | PercentageChangeAfter != 0)
+}
+
+# Execute for each city
+computed_Zurich_df <- compute(Zurich_joined, "Zurich")
+
+plot_maps <- function(data, city_name, bbox, city_coords) {
+  plot_for_period <- function(data, change_column, title) {
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>%
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") %>%
+      st_crop(., bbox)
+
+    labels = c("Very Negative", "Negative", "Neutral", "Positive", "Very Positive")
+  
+    # Create the tmap plot
+    tm <- tm_shape(city_sf) +
+          tm_fill(col = change_column, style = "quantile", 
+                  palette= c( "#A6611A","#DFC27D","#F5F5F5","#80CDC1","#018571"),
+                  title = paste0(city_name," - Change In Visitation Rates [%]"), legend.reverse = TRUE) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(zipcode_borders, bbox)) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(canton_borders, bbox)) +
+          tm_borders(col = "black") +
+          tm_shape(city_coords) +
+          tm_symbols(shape = 4, size = 0.3, col = "black") +
+          tm_shape(st_crop(lakes, bbox)) +
+          tm_fill(col = "#88CCEE") +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_layout(title = paste0(title),
+                    frame = TRUE,
+                    legend.position = c("left", "top"),
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.6,
+                    inner.margins = c(0.125,0.125,0.3,0.18),
+                    title.size = 0.9,
+                    main.title.fontface = "italic", 
+                    main.title.fontfamily = "sans") +
+          tm_scale_bar(position = c("right", "bottom"), text.size = 0.5, 
+                       bg.color = "white", bg.alpha = 1)
+    
+    # Print the map
+    print(tm)
+  }
+
+  plot_for_period(data, "PercentageChangeDuring", "Change in Visitation Rates Before to During Pandemic")
+  plot_for_period(data, "PercentageChangeAfter", "Change in Visitation Rates Before to After Pandemic")
+}
+
+plot_maps(computed_Zurich_df, "Zurich", zurich_box, zurich_sf)
+
+plot_maps <- function(data, city_name, bbox, city_coords) {
+  plot_for_period <- function(data, change_column, title) {
+    # Join the data with the spatial data
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>%
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") %>%
+      st_crop(., bbox)
+
+    # Calculate the breaks for the quantiles
+    quantiles <- quantile(data[[change_column]], probs = c(0.2, 0.8), na.rm = TRUE)
+
+    # Define breaks for the highest and lowest 20%
+    breaks <- c(-Inf, quantiles[1], quantiles[2], Inf)
+
+    # Create custom labels
+    labels <- c(
+      sprintf("%0.2f to %0.2f (Lowest 20%%)", min(data[[change_column]], na.rm = TRUE), quantiles[1]),
+      sprintf("%0.2f to %0.2f (Middle 60%%)", quantiles[1], quantiles[2]),
+      sprintf("%0.2f to %0.2f (Highest 20%%)", quantiles[2], max(data[[change_column]], na.rm = TRUE))
+    )
+
+    # Define a palette with three colors, one for each class
+    palette <- c("#A6611A", "#F5F5F5", "#018571")  # Middle color should be neutral
+
+    # Create the tmap plot with fixed breaks and custom labels
+    tm <- tm_shape(city_sf) +
+          tm_fill(col = change_column, style = "fixed", breaks = breaks,
+                  palette = palette,
+                  labels = labels,
+                  title = paste0(city_name," - Change In Visitation Rates [%]"),
+                  legend.reverse = TRUE) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(zipcode_borders, bbox)) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(canton_borders, bbox)) +
+          tm_borders(col = "black") +
+          tm_shape(city_coords) +
+          tm_symbols(shape = 4, size = 0.3, col = "black") +
+          tm_shape(st_crop(lakes, bbox)) +
+          tm_fill(col = "#88CCEE") +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_layout(title = paste0(title),
+                    frame = TRUE,
+                    legend.position = c("left", "top"),
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.6,
+                    inner.margins = c(0.125,0.125,0.3,0.18),
+                    title.size = 0.9,
+                    main.title.fontface = "italic", 
+                    main.title.fontfamily = "sans") +
+          tm_scale_bar(position = c("right", "bottom"), text.size = 0.5, 
+                       bg.color = "white", bg.alpha = 1)
+    
+    # Print the map
+    print(tm)
+  }
+
+  plot_for_period(data, "PercentageChangeDuring", "Highest and Lowest Change in Visitation Rates Before to During Pandemic")
+  plot_for_period(data, "PercentageChangeAfter", "Highest and Lowest Change in Visitation Rates Before to After Pandemic")
+}
+
+plot_maps(computed_Zurich_df, "Zurich", zurich_box, zurich_sf)
+
+
+```
+
+```{r}
+# Function to get top and bottom 5 zip codes for each period
+get_top_bottom_zipcodes <- function(data, value_column) {
+  top_5 <- data %>%
+    arrange(desc(!!sym(value_column))) %>%
+    slice_head(n = 5)
+
+  bottom_5 <- data %>%
+    arrange(!!sym(value_column)) %>%
+    slice_head(n = 5)
+
+  list(Top = top_5, Bottom = bottom_5)
+}
+
+# Applying the function to the computed_Zurich_df
+# Assuming computed_Zurich_df is already computed and available
+
+# For the period "during"
+top_bottom_during <- get_top_bottom_zipcodes(computed_Zurich_df, "PercentageChangeDuring")
+
+# For the period "after"
+top_bottom_after <- get_top_bottom_zipcodes(computed_Zurich_df, "PercentageChangeAfter")
+
+# Displaying results
+print("Top and bottom 5 zip codes for 'during' period:")
+print(top_bottom_during)
+print("Top and bottom 5 zip codes for 'after' period:")
+print(top_bottom_after)
+
+```
+
+
+#### Difference Visitations Geneva (GE)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Function to compute normalized counts
+calculate_normalized_counts <- function(data) {
+  data <- data %>%
+    group_by(Zipcode) %>%
+    summarise(n = n()) %>%
+    ungroup() %>%
+    right_join(zipcode_borders %>% 
+                 st_drop_geometry() %>% 
+                 dplyr::select(PLZ, Sum), by = c("Zipcode" = "PLZ")) %>%
+    replace_na(list(n = 0, Sum = 0)) %>%  # Added replacing NA with 0 for Sum
+    mutate(NormalizedCount = if_else(Sum == 0, 0, (n / Sum) * 100))  # handling division by zero
+  return(data)
+}
+
+# Function to calculate percentage changes
+percentage_changes <- function(before, during, after) {
+  data <- before %>%
+    dplyr::select(-n, -NormalizedCount) %>%
+    mutate(PercentageChangeDuring = (during$NormalizedCount - before$NormalizedCount),
+           PercentageChangeAfter = (after$NormalizedCount - before$NormalizedCount)) 
+  
+  return(data)
+}
+
+# Apply the functions
+compute <- function(city_df, city_name) {
+  city_df <- city_df[city_df$Distance <= 60, ]
+  # Split the data into three periods
+  data_before <- city_df[city_df$Date < as.Date("2020-03-11"), ]
+  data_during <- city_df[city_df$Date >= as.Date("2020-03-11") & city_df$Date < as.Date("2021-03-22"), ]
+  data_after <- city_df[city_df$Date >= as.Date("2021-03-22"), ]
+
+  before <- calculate_normalized_counts(data_before)
+  during <- calculate_normalized_counts(data_during)
+  after <- calculate_normalized_counts(data_after)
+
+  changes <- percentage_changes(before, during, after)
+  changes <- changes %>%
+    filter(PercentageChangeDuring != 0 | PercentageChangeAfter != 0)
+}
+
+# Execute for each city
+computed_Geneva_df <- compute(Geneva_joined, "Geneva")
+
+plot_maps <- function(data, city_name, bbox, city_coords) {
+  plot_for_period <- function(data, change_column, title) {
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>%
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") %>%
+      st_crop(., bbox)
+
+    # Create the tmap plot
+    tm <- tm_shape(city_sf) +
+      tm_fill(col = change_column, style = "quantile", 
+                  palette= c( "#A6611A","#DFC27D","#F5F5F5","#80CDC1","#018571"),
+                  title = paste0(city_name," - Change In Visitation Rates [%]"), legend.reverse = TRUE) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(zipcode_borders, bbox)) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(canton_borders, bbox)) +
+          tm_borders(col = "black") +
+          tm_shape(city_coords) +
+          tm_symbols(shape = 4, size = 0.3, col = "black") +
+          tm_shape(st_crop(lakes, bbox)) +
+          tm_fill(col = "#88CCEE") +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_layout(title = paste0(title),
+                    frame = TRUE,
+                    legend.position = c("left", "top"),
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.6,
+                    inner.margins = c(0.1,0.125,0.25,0.2),
+                    title.size =0.9,
+                    main.title.fontface = "italic", 
+                    main.title.fontfamily = "sans") +
+          tm_scale_bar(position = c("right", "bottom"), text.size = 0.5, 
+                       bg.color = "white", bg.alpha = 1)
+    
+    # Print the map
+    print(tm)
+  }
+
+  plot_for_period(data, "PercentageChangeDuring", "Change in Visitation Rates Before to During Pandemic")
+  plot_for_period(data, "PercentageChangeAfter", "Change in Visitation Rates Before to After Pandemic")
+}
+
+plot_maps(computed_Geneva_df, "Geneva", geneva_box, geneva_sf)
+
+plot_maps <- function(data, city_name, bbox, city_coords) {
+  plot_for_period <- function(data, change_column, title) {
+    # Join the data with the spatial data
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>%
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") %>%
+      st_crop(., bbox)
+
+    # Calculate the breaks for the quantiles
+    quantiles <- quantile(data[[change_column]], probs = c(0.2, 0.8), na.rm = TRUE)
+
+    # Define breaks for the highest and lowest 20%
+    breaks <- c(-Inf, quantiles[1], quantiles[2], Inf)
+
+    # Create custom labels
+    labels <- c(
+      sprintf("%0.2f to %0.2f (Lowest 20%%)", min(data[[change_column]], na.rm = TRUE), quantiles[1]),
+      sprintf("%0.2f to %0.2f (Middle 60%%)", quantiles[1], quantiles[2]),
+      sprintf("%0.2f to %0.2f (Highest 20%%)", quantiles[2], max(data[[change_column]], na.rm = TRUE))
+    )
+
+    # Define a palette with three colors, one for each class
+    palette <- c("#A6611A", "#F5F5F5", "#018571")  # Middle color should be neutral
+
+    # Create the tmap plot with fixed breaks and custom labels
+    tm <- tm_shape(city_sf) +
+          tm_fill(col = change_column, style = "fixed", breaks = breaks,
+                  palette = palette,
+                  labels = labels,
+                  title = paste0(city_name," - Change In Visitation Rates [%]"),
+                  legend.reverse = TRUE) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(zipcode_borders, bbox)) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(canton_borders, bbox)) +
+          tm_borders(col = "black") +
+          tm_shape(city_coords) +
+          tm_symbols(shape = 4, size = 0.3, col = "black") +
+          tm_shape(st_crop(lakes, bbox)) +
+          tm_fill(col = "#88CCEE") +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_layout(title = paste0(title),
+                    frame = TRUE,
+                    legend.position = c("left", "top"),
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.6,
+                    inner.margins = c(0.1,0.125,0.25,0.2),
+                    title.size = 0.9,
+                    main.title.fontface = "italic", 
+                    main.title.fontfamily = "sans") +
+          tm_scale_bar(position = c("right", "bottom"), text.size = 0.5, 
+                       bg.color = "white", bg.alpha = 1)
+    
+    # Print the map
+    print(tm)
+  }
+
+  plot_for_period(data, "PercentageChangeDuring", "Highest and Lowest Change in Visitation Rates Before to During Pandemic")
+  plot_for_period(data, "PercentageChangeAfter", "Highest and Lowest Change in Visitation Rates Before to After Pandemic")
+}
+
+plot_maps(computed_Geneva_df, "Geneva", geneva_box, geneva_sf)
+
+```
+```{r}
+# Function to get top and bottom 5 zip codes for each period
+get_top_bottom_zipcodes <- function(data, value_column) {
+  top_5 <- data %>%
+    arrange(desc(!!sym(value_column))) %>%
+    slice_head(n = 5)
+
+  bottom_5 <- data %>%
+    arrange(!!sym(value_column)) %>%
+    slice_head(n = 5)
+
+  list(Top = top_5, Bottom = bottom_5)
+}
+
+# Applying the function to the computed_Zurich_df
+# Assuming computed_Zurich_df is already computed and available
+
+# For the period "during"
+top_bottom_during <- get_top_bottom_zipcodes(computed_Geneva_df, "PercentageChangeDuring")
+
+# For the period "after"
+top_bottom_after <- get_top_bottom_zipcodes(computed_Geneva_df, "PercentageChangeAfter")
+
+# Displaying results
+print("Top and bottom 5 zip codes for 'during' period:")
+print(top_bottom_during)
+print("Top and bottom 5 zip codes for 'after' period:")
+print(top_bottom_after)
+```
+
+
+
+#### Difference Visitations Ticino (TI)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Function to compute normalized counts
+calculate_normalized_counts <- function(data) {
+  data <- data %>%
+    group_by(Zipcode) %>%
+    summarise(n = n()) %>%
+    ungroup() %>%
+    right_join(zipcode_borders %>% 
+                 st_drop_geometry() %>% 
+                 dplyr::select(PLZ, Sum), by = c("Zipcode" = "PLZ")) %>%
+    replace_na(list(n = 0, Sum = 0)) %>%  # Added replacing NA with 0 for Sum
+    mutate(NormalizedCount = if_else(Sum == 0, 0, (n / Sum) * 100))  # handling division by zero
+  return(data)
+}
+
+# Function to calculate percentage changes
+percentage_changes <- function(before, during, after) {
+  data <- before %>%
+    dplyr::select(-n, -NormalizedCount) %>%
+    mutate(PercentageChangeDuring = (during$NormalizedCount - before$NormalizedCount),
+           PercentageChangeAfter = (after$NormalizedCount - before$NormalizedCount))
+  return(data)
+}
+
+# Make sure to have the necessary data and libraries loaded before running the function
+
+# Apply the functions
+compute <- function(city_df, city_name) {
+  city_df <- city_df[city_df$Distance <= 60, ]
+  # Split the data into three periods
+  data_before <- city_df[city_df$Date < as.Date("2020-03-11"), ]
+  data_during <- city_df[city_df$Date >= as.Date("2020-03-11") & city_df$Date < as.Date("2021-03-22"), ]
+  data_after <- city_df[city_df$Date >= as.Date("2021-03-22"), ]
+
+  before <- calculate_normalized_counts(data_before)
+  during <- calculate_normalized_counts(data_during)
+  after <- calculate_normalized_counts(data_after)
+
+  changes <- percentage_changes(before, during, after)
+  changes <- changes %>%
+    filter(PercentageChangeDuring != 0 | PercentageChangeAfter != 0)
+}
+
+# Execute for each city
+computed_Bellinzona_df <- compute(Bellinzona_joined, "Bellinzona")
+
+plot_maps <- function(data, city_name, bbox, city_coords) {
+  plot_for_period <- function(data, change_column, title) {
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>%
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") %>%
+      st_crop(., bbox)
+
+    # Create the tmap plot
+    tm <- tm_shape(city_sf) +
+          tm_fill(col = change_column, style = "quantile", n = 5, 
+                  palette= c( "#A6611A","#DFC27D","#F5F5F5","#80CDC1","#018571"),
+                  title = paste0(city_name," - Change In Visitation Rates [%]")) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(zipcode_borders, bbox)) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(canton_borders, bbox)) +
+          tm_borders(col = "black") +
+          tm_shape(city_coords) +
+          tm_symbols(shape = 4, size = 0.3, col = "black") +
+          tm_shape(st_crop(lakes, bbox)) +
+          tm_fill(col = "#88CCEE") +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_layout(title = paste0(title),
+                    frame = TRUE,
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.6,
+                    inner.margins = c(0.175,0.2,0.25,0.35),
+                    title.size = 0.9,
+                    main.title.fontface = "italic", 
+                    main.title.fontfamily = "sans") +
+          tm_scale_bar(position = c("right", "bottom"), text.size = 0.5, 
+                       bg.color = "white", bg.alpha = 1)
+    
+    # Print the map
+    print(tm)
+  }
+
+  plot_for_period(data, "PercentageChangeDuring", "Change in Visitation Rates Before to During Pandemic")
+  plot_for_period(data, "PercentageChangeAfter", "Change in Visitation Rates Before to After Pandemic")
+}
+
+plot_maps(computed_Bellinzona_df, "Bellinzona", bellinzona_box, bellinzona_sf)
+
+plot_maps <- function(data, city_name, bbox, city_coords) {
+  plot_for_period <- function(data, change_column, title) {
+    # Join the data with the spatial data
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>%
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") %>%
+      st_crop(., bbox)
+
+    # Calculate the breaks for the quantiles
+    quantiles <- quantile(data[[change_column]], probs = c(0.2, 0.8), na.rm = TRUE)
+
+    # Define breaks for the highest and lowest 20%
+    breaks <- c(-Inf, quantiles[1], quantiles[2], Inf)
+
+    # Create custom labels
+    labels <- c(
+      sprintf("%0.2f to %0.2f (Lowest 20%%)", min(data[[change_column]], na.rm = TRUE), quantiles[1]),
+      sprintf("%0.2f to %0.2f (Middle 60%%)", quantiles[1], quantiles[2]),
+      sprintf("%0.2f to %0.2f (Highest 20%%)", quantiles[2], max(data[[change_column]], na.rm = TRUE))
+    )
+
+    # Define a palette with three colors, one for each class
+    palette <- c("#A6611A", "#F5F5F5", "#018571")  # Middle color should be neutral
+
+    # Create the tmap plot with fixed breaks and custom labels
+    tm <- tm_shape(city_sf) +
+          tm_fill(col = change_column, style = "fixed", breaks = breaks,
+                  palette = palette,
+                  labels = labels,
+                  title = paste0(city_name," - Change In Visitation Rates [%]"),
+                  legend.reverse = TRUE) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(zipcode_borders, bbox)) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(canton_borders, bbox)) +
+          tm_borders(col = "black") +
+          tm_shape(city_coords) +
+          tm_symbols(shape = 4, size = 0.3, col = "black") +
+          tm_shape(st_crop(lakes, bbox)) +
+          tm_fill(col = "#88CCEE") +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_layout(title = paste0(title),
+                    frame = TRUE,
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.6,
+                    inner.margins = c(0.175,0.2,0.25,0.35),
+                    title.size = 0.9,
+                    main.title.fontface = "italic", 
+                    main.title.fontfamily = "sans") +
+          tm_scale_bar(position = c("right", "bottom"), text.size = 0.5, 
+                       bg.color = "white", bg.alpha = 1)
+    
+    # Print the map
+    print(tm)
+  }
+
+  plot_for_period(data, "PercentageChangeDuring", "Highest and Lowest Change in Visitation Rates Before to During Pandemic")
+  plot_for_period(data, "PercentageChangeAfter", "Highest and Lowest Change in Visitation Rates Before to After Pandemic")
+}
+
+
+plot_maps(computed_Bellinzona_df, "Bellinzona", bellinzona_box, bellinzona_sf)
+
+```
+```{r}
+# Function to get top and bottom 5 zip codes for each period
+get_top_bottom_zipcodes <- function(data, value_column) {
+  top_5 <- data %>%
+    arrange(desc(!!sym(value_column))) %>%
+    slice_head(n = 5)
+
+  bottom_5 <- data %>%
+    arrange(!!sym(value_column)) %>%
+    slice_head(n = 5)
+
+  list(Top = top_5, Bottom = bottom_5)
+}
+
+# Applying the function to the computed_Zurich_df
+# Assuming computed_Zurich_df is already computed and available
+
+# For the period "during"
+top_bottom_during <- get_top_bottom_zipcodes(computed_Bellinzona_df, "PercentageChangeDuring")
+
+# For the period "after"
+top_bottom_after <- get_top_bottom_zipcodes(computed_Bellinzona_df, "PercentageChangeAfter")
+
+# Displaying results
+print("Top and bottom 5 zip codes for 'during' period:")
+print(top_bottom_during)
+print("Top and bottom 5 zip codes for 'after' period:")
+print(top_bottom_after)
+```
+
+### Admission Rates
+
+```{r}
+# Filter data for each time period for each city
+geneva_before <- Geneva[Geneva$Date < as.Date("2020-03-11"), ]
+geneva_during <- Geneva[Geneva$Date >= as.Date("2020-03-11") & Geneva$Date < as.Date("2021-03-22"), ]
+geneva_after <- Geneva[Geneva$Date >= as.Date("2021-03-22"), ]
+
+bellinzona_before <- Bellinzona[Bellinzona$Date < as.Date("2020-03-11"), ]
+bellinzona_during <- Bellinzona[Bellinzona$Date >= as.Date("2020-03-11") & Bellinzona$Date < as.Date("2021-03-22"), ]
+bellinzona_after <- Bellinzona[Bellinzona$Date >= as.Date("2021-03-22"), ]
+
+zurich_before <- Zurich[Zurich$Date < as.Date("2020-03-11"), ]
+zurich_during <- Zurich[Zurich$Date >= as.Date("2020-03-11") & Zurich$Date < as.Date("2021-03-22"), ]
+zurich_after <- Zurich[Zurich$Date >= as.Date("2021-03-22"), ]
+
+# Assuming 'data' contains the 'Sum' column for all children in Switzerland
+total_children_switzerland <- 1755213
+
+# Function to calculate hospitalization rate
+calculate_hospitalization_rate <- function(period_data) {
+  total_hospitalizations <- nrow(period_data)
+  return (total_hospitalizations / total_children_switzerland)
+}
+
+# Calculate rates for each city and period
+rate_before_geneva <- calculate_hospitalization_rate(geneva_before)
+rate_during_geneva <- calculate_hospitalization_rate(geneva_during)
+rate_after_geneva <- calculate_hospitalization_rate(geneva_after)
+
+rate_before_bellinzona <- calculate_hospitalization_rate(bellinzona_before)
+rate_during_bellinzona <- calculate_hospitalization_rate(bellinzona_during)
+rate_after_bellinzona <- calculate_hospitalization_rate(bellinzona_after)
+
+rate_before_zurich <- calculate_hospitalization_rate(zurich_before)
+rate_during_zurich <- calculate_hospitalization_rate(zurich_during)
+rate_after_zurich <- calculate_hospitalization_rate(zurich_after)
+
+# Function to calculate percentage change
+calculate_percentage_change <- function(rate1, rate2) {
+  return ((rate2 - rate1) / rate1 * 100)
+}
+
+# Calculate percentage changes for each city
+percentage_change_geneva_before_during <- calculate_percentage_change(rate_before_geneva, rate_during_geneva)
+percentage_change_geneva_during_after <- calculate_percentage_change(rate_during_geneva, rate_after_geneva)
+percentage_change_geneva_before_after <- calculate_percentage_change(rate_before_geneva, rate_after_geneva)
+
+percentage_change_bellinzona_before_during <- calculate_percentage_change(rate_before_bellinzona, rate_during_bellinzona)
+percentage_change_bellinzona_during_after <- calculate_percentage_change(rate_during_bellinzona, rate_after_bellinzona)
+percentage_change_bellinzona_before_after <- calculate_percentage_change(rate_before_bellinzona, rate_after_bellinzona)
+
+percentage_change_zurich_before_during <- calculate_percentage_change(rate_before_zurich, rate_during_zurich)
+percentage_change_zurich_during_after <- calculate_percentage_change(rate_during_zurich, rate_after_zurich)
+percentage_change_zurich_before_after <- calculate_percentage_change(rate_before_zurich, rate_after_zurich)
+
+# Output the results
+list(
+  Geneva = list(
+    Before = rate_before_geneva, 
+    During = rate_during_geneva, 
+    After = rate_after_geneva, 
+    PercentageChange = list(
+      Before_During = percentage_change_geneva_before_during,
+      During_After = percentage_change_geneva_during_after,
+      Before_After = percentage_change_geneva_before_after
+    )
+  ),
+  Bellinzona = list(
+    Before = rate_before_bellinzona, 
+    During = rate_during_bellinzona, 
+    After = rate_after_bellinzona, 
+    PercentageChange = list(
+      Before_During = percentage_change_bellinzona_before_during,
+      During_After = percentage_change_bellinzona_during_after,
+      Before_After = percentage_change_bellinzona_before_after
+    )
+  ),
+  Zurich = list(
+    Before = rate_before_zurich, 
+    During = rate_during_zurich, 
+    After = rate_after_zurich, 
+    PercentageChange = list(
+      Before_During = percentage_change_zurich_before_during,
+      During_After = percentage_change_zurich_during_after,
+      Before_After = percentage_change_zurich_before_after
+    )
+  )
+)
+
+
+```
+
+## Relevant factors
+
+### Separate Cities
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# Updated function to model the data with 'Period'
+poisson_model <- function(data, city_name) {
+  data$Visitation <- 1
+  # Model the data using Poisson regression including the 'Period' variable
+  model <- glm(formula = Visitation ~ factor(TriageCategory) + Age + factor(Gender) + 
+                 factor(Reason) + factor(Type) + Sum + Distance + factor(Period), 
+     
+                         family = "poisson", data = data)
+  
+  summary(model)
+  
+  # Print the summary
+  cat("\n", city_name, "\n")
+  print(summary(model))
+  
+  return(model)
+}
+
+# Function to process each city's data
+process_city_data <- function(city_df, city_name) {
+  cat("\nProcessing data for", city_name, "\n")
+
+  # Add 'Period' column to the dataset
+  city_df$Period <- ifelse(city_df$Date < as.Date("2020-03-11"), 1,
+                           ifelse(city_df$Date < as.Date("2021-03-22"), 2, 3))
+  # Run Poisson regression model on the entire dataset
+  poisson_model(city_df, city_name)
+}
+
+# Execute for each city
+process_city_data(Zurich_joined, "Zurich")
+process_city_data(Geneva_joined, "Geneva")
+process_city_data(Bellinzona_joined, "Bellinzona")
+
+```
+
+### Combined Cities
+
+```{r}
+# Function to model the data with 'Period' and 'City'
+poisson_model <- function(data) {
+  data$Visitation <- 1
+  # Model the data using Poisson regression including the 'Period' and 'City' variables
+  model <- glm(formula = Visitation ~ factor(TriageCategory) + Age + factor(Gender) + 
+                 factor(Reason) + factor(Type) + Sum + Distance + factor(Period) + 
+                 factor(City), 
+               family = "poisson", data = data)
+  
+  # Print the summary
+  print(summary(model))
+  
+  return(model)
+}
+
+# Function to add 'Period' column and 'City' identifier to each city's data
+add_city_info <- function(city_df, city_name) {
+  city_df$Period <- ifelse(city_df$Date < as.Date("2020-03-11"), 1,
+                           ifelse(city_df$Date < as.Date("2021-03-22"), 2, 3))
+  city_df$City <- ifelse(city_name == "Zurich", 1,
+                         ifelse(city_name == "Bellinzona", 2, 3))
+  return(city_df)
+}
+
+# Add city info and combine datasets
+zurich_processed <- add_city_info(Zurich_joined, "Zurich")
+geneva_processed <- add_city_info(Geneva_joined, "Geneva")
+bellinzona_processed <- add_city_info(Bellinzona_joined, "Bellinzona")
+combined_df <- rbind(zurich_processed, geneva_processed, bellinzona_processed)
+
+# Run Poisson regression model on the combined dataset
+combined_model <- poisson_model(combined_df)
+
+```
+
+```{r}
+combined_df_level <- combined_df
+ref_tables <- list()
+for (col in colnames(combined_df_level)) {
+  # check if the column is character type for the current iteration of the loop
+  if (is.character(combined_df_level[[col]])) {
+    # recode to numeric values
+    levels <- unique(combined_df_level[[col]])
+    combined_df_level[[col]] <- as.numeric(factor(combined_df_level[[col]], levels = levels))
+    # create reference table data frame
+    ref_accident_data <- data.frame(value = 1:length(levels), label = levels)
+    # add reference table data frame to list
+    ref_tables[[col]] <- ref_accident_data
+  }
+}
+```
+
+```{r}
+# Define a custom aggregation function
+custom_aggregate <- function(x) {
+  if (is.numeric(x)) {
+    return(mean(x))
+  } else {
+    return(prop.table(table(x)))
+  }
+}
+
+# Apply custom aggregation
+agg_data <- aggregate(cbind(Age, TriageCategory, Sum, Distance, Period, Month, Day, Year, City, Reason, Type, Gender, Nationality,COVID) ~ Zipcode, 
+                      data = combined_df_level, FUN = custom_aggregate)
+
+# Poisson model
+poisson_model_plz <- glm(Zipcode ~ Age + Sum + Distance + Period + TriageCategory + Month + Day + Year + City + Reason + Type + Gender + Nationality + COVID,data = agg_data, family = "poisson", weights = rep(1, nrow(agg_data)))
+
+# Model summary
+summary(poisson_model_plz)
+
+```
+
+```{r}
+# Load the lme4 package
+library(lme4)
+
+# Define a custom aggregation function
+custom_aggregate <- function(x) {
+  if (is.numeric(x)) {
+    return(mean(x))
+  } else {
+    return(prop.table(table(x)))
+  }
+}
+
+# Apply custom aggregation
+agg_data <- aggregate(cbind(Age, TriageCategory, Sum, Distance, Period, Month, Day, Year, City, Reason, Type, Gender, Nationality,COVID) ~ Zipcode, 
+                      data = combined_df_level, FUN = custom_aggregate)
+# List of numeric variables to scale
+numeric_vars <- c("Age", "TriageCategory", "Sum", "Distance", "Period", "Month", "Day", "Year", "City", "Reason", "Type", "Gender", "Nationality","COVID")
+
+# Scale numeric variables
+agg_data[numeric_vars] <- lapply(agg_data[numeric_vars], scale)
+
+# Generalized linear mixed-effects model (glmer)
+glmer_model_plz <- glmer(Zipcode ~ Age + Sum + Distance + Period + TriageCategory + Month + Day + Year + City + Reason + Type + Gender + Nationality + COVID +(1 | Zipcode),  # Random effect for Zipcode
+                         data = agg_data, family = poisson(), weights = rep(1, nrow(agg_data)),
+                         control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+
+# Model summary
+summary(glmer_model_plz)
+
+```
+
+## Excursus: Temporal Analysis
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Modified function to include normalization
+plot_weekday_counts <- function(city_df, city_name, normalisation_before, normalisation_during, normalisation_after) {
+  
+  # Add a new column for the weekday extracted from the Date column
+  city_df <- city_df %>%
+    mutate(Weekday = weekdays(as.Date(Date, format="%Y-%m-%d")))
+  
+  # Modified function to prepare data: group by weekday and count occurrences, then normalize
+  prepare_data <- function(data, period, normalisation) {
+    data %>%
+      group_by(Weekday) %>%
+      summarise(Count = mean(n())/normalisation) %>%
+      ungroup() %>%
+      mutate(Period = period, 
+             Weekday = factor(Weekday, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday","Sunday")))
+  }
+
+  # Apply the function to each time period with corresponding normalization values
+  data_before <- prepare_data(city_df[city_df$Date < as.Date("2020-03-11"), ], "Before Pandemic", normalisation_before)
+  data_during <- prepare_data(city_df[city_df$Date >= as.Date("2020-03-11") & city_df$Date < as.Date("2021-03-22"), ], "During Pandemic", normalisation_during)
+  data_after <- prepare_data(city_df[city_df$Date >= as.Date("2021-03-22"), ], "After Pandemic", normalisation_after)
+
+  combined_data <- rbind(data_before, data_during, data_after)
+  
+  # Order the Period factor levels
+  combined_data$Period <- factor(combined_data$Period, 
+                                 levels = c("Before Pandemic", "During Pandemic", "After Pandemic"))
+
+  # Plot
+  ggplot(combined_data, aes(x = Weekday, y = Count, fill = Period)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(
+      title = paste("Visitations per Weekday in", city_name),
+      x = "Weekday",
+      y = "Normalized Count") +
+    theme_minimal() +
+      theme(plot.title = element_text(size = 11, face = "italic", hjust = 0.5),
+            axis.title.x = element_text(size = 8), 
+            axis.title.y = element_text(size = 8),
+            legend.position = "bottom"
+      )+
+    scale_fill_manual(values = c("Before Pandemic" = "#88CCEE", "During Pandemic" = "#CC6677", "After Pandemic" = "#117733"))
+}
+
+# Apply the function to each city with normalization factors
+normalisation_before <- 24.32
+normalisation_during <- 12.35
+normalisation_after <- 11.21
+
+plot_weekday_counts(Zurich_joined, "Zurich", normalisation_before, normalisation_during, normalisation_after)
+plot_weekday_counts(Bellinzona_joined, "Bellinzona", normalisation_before, normalisation_during, normalisation_after)
+plot_weekday_counts(Geneva_joined, "Geneva", normalisation_before, normalisation_during, normalisation_after)
+
+
+```
+
+## Archive
+### Difference in Visitations Mapping (All Distances)
+
+The following maps show the changes in the allocations for the three cities of Geneva, Bellinzona, and Zurich. The percentage change in admission rates is compared with the period before the pandemic. Again, the five classes are quantiles, covering 20% of the value range.
+
+#### Difference Visitations Zurich (ZH)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Function to compute normalized counts
+calculate_normalized_counts <- function(data) {
+  data <- data %>%
+    group_by(Zipcode) %>%
+    summarise(n = n()) %>%
+    ungroup() %>%
+    right_join(zipcode_borders %>% 
+                 st_drop_geometry() %>% 
+                 dplyr::select(PLZ, Sum), by = c("Zipcode" = "PLZ")) %>%
+    replace_na(list(n = 0, Sum = 0)) %>%  # Added replacing NA with 0 for Sum
+    mutate(NormalizedCount = if_else(Sum == 0, 0, (n / Sum) * 100))  # handling division by zero
+  return(data)
+}
+
+# Function to calculate percentage changes
+percentage_changes <- function(before, during, after) {
+  data <- before %>%
+    dplyr::select(-n, -NormalizedCount) %>%
+    mutate(PercentageChangeDuring = (during$NormalizedCount - before$NormalizedCount),
+           PercentageChangeAfter = (after$NormalizedCount - before$NormalizedCount))
+  return(data)
+}
+
+# Make sure to have the necessary data and libraries loaded before running the function
+
+# Apply the functions
+compute <- function(city_df, city_name) {
+  # Split the data into three periods
+  data_before <- city_df[city_df$Date < as.Date("2020-03-11"), ]
+  data_during <- city_df[city_df$Date >= as.Date("2020-03-11") & city_df$Date < as.Date("2021-03-22"), ]
+  data_after <- city_df[city_df$Date >= as.Date("2021-03-22"), ]
+
+  before <- calculate_normalized_counts(data_before)
+  during <- calculate_normalized_counts(data_during)
+  after <- calculate_normalized_counts(data_after)
+
+  changes <- percentage_changes(before, during, after)
+}
+
+# Execute for each city
+computed_Zurich_df <- compute(Zurich_joined, "Zurich")
+
+plot_maps <- function(data, city_name, bbox, city_coords) {
+  plot_for_period <- function(data, change_column, title) {
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>%
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") %>%
+      st_crop(., bbox)
+
+    labels = c("Very Negative", "Negative", "Neutral", "Positive", "Very Positive")
+  
+    # Create the tmap plot
+    tm <- tm_shape(city_sf) +
+          tm_fill(col = change_column, style = "quantile", 
+                  palette= c( "#A6611A","#DFC27D","#F5F5F5","#80CDC1","#018571"),
+                  title = paste0(city_name," - Change In Visitation Rates [%]"), legend.reverse = TRUE, n = 5) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(zipcode_borders, bbox)) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(canton_borders, bbox)) +
+          tm_borders(col = "black") +
+          tm_shape(city_coords) +
+          tm_symbols(shape = 4, size = 0.3, col = "black") +
+          tm_shape(st_crop(lakes, bbox)) +
+          tm_fill(col = "#88CCEE") +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_layout(title = paste0(title),
+                    frame = TRUE,
+                    legend.position = c("left", "top"),
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.6,
+                    inner.margins = 0.1,
+                    main.title.size = 2,
+                    main.title.fontface = "italic", 
+                    main.title.fontfamily = "sans") +
+          tm_scale_bar(position = c("right", "bottom"), text.size = 0.5)
+    
+    # Print the map
+    print(tm)
+  }
+
+  plot_for_period(data, "PercentageChangeDuring", "During Pandemic")
+  plot_for_period(data, "PercentageChangeAfter", "After Pandemic")
+}
+
+plot_maps(computed_Zurich_df, "Zurich", zurich_box, zurich_sf)
+
+```
+
+#### Difference Visitations Geneva (GE)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Function to compute normalized counts
+calculate_normalized_counts <- function(data) {
+  data <- data %>%
+    group_by(Zipcode) %>%
+    summarise(n = n()) %>%
+    ungroup() %>%
+    right_join(zipcode_borders %>% 
+                 st_drop_geometry() %>% 
+                 dplyr::select(PLZ, Sum), by = c("Zipcode" = "PLZ")) %>%
+    replace_na(list(n = 0, Sum = 0)) %>%  # Added replacing NA with 0 for Sum
+    mutate(NormalizedCount = if_else(Sum == 0, 0, (n / Sum) * 100))  # handling division by zero
+  return(data)
+}
+
+# Function to calculate percentage changes
+percentage_changes <- function(before, during, after) {
+  data <- before %>%
+    dplyr::select(-n, -NormalizedCount) %>%
+    mutate(PercentageChangeDuring = (during$NormalizedCount - before$NormalizedCount),
+           PercentageChangeAfter = (after$NormalizedCount - before$NormalizedCount)) 
+  
+  data$PercentageChangeDuring <- as.numeric(data$PercentageChangeDuring)
+  data$PercentageChangeAfter <- as.numeric(data$PercentageChangeAfter)
+  return(data)
+}
+
+# Apply the functions
+compute <- function(city_df, city_name) {
+  # Split the data into three periods
+  data_before <- city_df[city_df$Date < as.Date("2020-03-11"), ]
+  data_during <- city_df[city_df$Date >= as.Date("2020-03-11") & city_df$Date < as.Date("2021-03-22"), ]
+  data_after <- city_df[city_df$Date >= as.Date("2021-03-22"), ]
+
+  before <- calculate_normalized_counts(data_before)
+  during <- calculate_normalized_counts(data_during)
+  after <- calculate_normalized_counts(data_after)
+
+  changes <- percentage_changes(before, during, after)
+}
+
+# Execute for each city
+computed_Zurich_df <- compute(Zurich_joined, "Zurich")
+computed_Bellinzona_df <- compute(Bellinzona_joined, "Bellinzona")
+computed_Geneva_df <- compute(Geneva_joined, "Geneva")
+
+plot_maps <- function(data, city_name, bbox, city_coords) {
+  plot_for_period <- function(data, change_column, title) {
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>%
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") %>%
+      st_crop(., bbox)
+    
+    
+
+    # Create the tmap plot
+    tm <- tm_shape(city_sf) +
+          tm_fill(col = change_column, style = "quantile", n = 5, 
+                  palette= c( "#A6611A","#DFC27D","#F5F5F5","#80CDC1","#018571"),
+                  title = paste0(city_name," - Change In Visitation Rates [%]")) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(zipcode_borders, bbox)) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(canton_borders, bbox)) +
+          tm_borders(col = "black") +
+          tm_shape(city_coords) +
+          tm_symbols(shape = 4, size = 0.3, col = "black") +
+          tm_shape(st_crop(lakes, bbox)) +
+          tm_fill(col = "#88CCEE") +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_layout(title = paste0(title),
+                    frame = TRUE,
+                    legend.position = c("left", "top"),
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.6,
+                    inner.margins = 0.1,
+                    main.title.size = 2,
+                    main.title.fontface = "italic", 
+                    main.title.fontfamily = "sans") +
+          tm_scale_bar(position = c("right", "bottom"), text.size = 0.5)
+    
+    # Print the map
+    print(tm)
+  }
+
+  plot_for_period(data, "PercentageChangeDuring", "During Pandemic")
+  plot_for_period(data, "PercentageChangeAfter", "After Pandemic")
+}
+
+plot_maps(computed_Geneva_df, "Geneva", geneva_box, geneva_sf)
+
+```
+
+#### Difference Visitations Ticino (TI)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Function to compute normalized counts
+calculate_normalized_counts <- function(data) {
+  data <- data %>%
+    group_by(Zipcode) %>%
+    summarise(n = n()) %>%
+    ungroup() %>%
+    right_join(zipcode_borders %>% 
+                 st_drop_geometry() %>% 
+                 dplyr::select(PLZ, Sum), by = c("Zipcode" = "PLZ")) %>%
+    replace_na(list(n = 0, Sum = 0)) %>%  # Added replacing NA with 0 for Sum
+    mutate(NormalizedCount = if_else(Sum == 0, 0, (n / Sum) * 100))  # handling division by zero
+  return(data)
+}
+
+# Function to calculate percentage changes
+percentage_changes <- function(before, during, after) {
+  data <- before %>%
+    dplyr::select(-n, -NormalizedCount) %>%
+    mutate(PercentageChangeDuring = (during$NormalizedCount - before$NormalizedCount),
+           PercentageChangeAfter = (after$NormalizedCount - before$NormalizedCount))
+  return(data)
+}
+
+# Make sure to have the necessary data and libraries loaded before running the function
+
+# Apply the functions
+compute <- function(city_df, city_name) {
+  # Split the data into three periods
+  data_before <- city_df[city_df$Date < as.Date("2020-03-11"), ]
+  data_during <- city_df[city_df$Date >= as.Date("2020-03-11") & city_df$Date < as.Date("2021-03-22"), ]
+  data_after <- city_df[city_df$Date >= as.Date("2021-03-22"), ]
+
+  before <- calculate_normalized_counts(data_before)
+  during <- calculate_normalized_counts(data_during)
+  after <- calculate_normalized_counts(data_after)
+
+  changes <- percentage_changes(before, during, after)
+}
+
+# Execute for each city
+computed_Zurich_df <- compute(Zurich_joined, "Zurich")
+computed_Bellinzona_df <- compute(Bellinzona_joined, "Bellinzona")
+computed_Geneva_df <- compute(Geneva_joined, "Geneva")
+
+plot_maps <- function(data, city_name, bbox, city_coords) {
+  plot_for_period <- function(data, change_column, title) {
+    city_sf <- left_join(data, zipcode_borders, by = c("Zipcode" = "PLZ")) %>%
+      st_as_sf() %>% 
+      st_set_geometry(., "geometry") %>%
+      st_crop(., bbox)
+
+    # Create the tmap plot
+    tm <- tm_shape(city_sf) +
+          tm_fill(col = change_column, style = "quantile", n = 5, 
+                  palette= c( "#A6611A","#DFC27D","#F5F5F5","#80CDC1","#018571"),
+                  title = paste0(city_name," - Change In Visitation Rates [%]")) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(zipcode_borders, bbox)) +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_shape(st_crop(canton_borders, bbox)) +
+          tm_borders(col = "black") +
+          tm_shape(city_coords) +
+          tm_symbols(shape = 4, size = 0.3, col = "black") +
+          tm_shape(st_crop(lakes, bbox)) +
+          tm_fill(col = "#88CCEE") +
+          tm_borders(col = "#cccccc", lwd = 0.1) +
+          tm_layout(title = paste0(title),
+                    frame = TRUE,
+                    legend.position = c(0.65,0.1),
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.6,
+                    inner.margins = 0.1,
+                    main.title.size = 2,
+                    main.title.fontface = "italic", 
+                    main.title.fontfamily = "sans") +
+          tm_scale_bar(position = c("right", "bottom"), text.size = 0.5)
+    
+    # Print the map
+    print(tm)
+  }
+
+  plot_for_period(data, "PercentageChangeDuring", "During Pandemic")
+  plot_for_period(data, "PercentageChangeAfter", "After Pandemic")
+}
+
+plot_maps(computed_Bellinzona_df, "Bellinzona", bellinzona_box, bellinzona_sf)
+
+```
+
+

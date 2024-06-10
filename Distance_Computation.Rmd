@@ -1,0 +1,97 @@
+---
+title: "Distance_Computation"
+author: "Gregory Biland"
+date: "2023-10-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages
+
+```{r}
+#DU WIRST NICHT ALLE BRAUCHEN ABER DAS SIND DIE PACKAGES DIE ICH INSTALLIERT HABE
+options(scipen = 999)
+
+library(sf)
+library(tidyverse)
+library(ggplot2)
+library(rgdal)
+library(raster)
+library(fca)
+library(reshape2)
+library(dvmisc)
+library(gtools)
+library(viridis)
+library(ggspatial)
+library(RColorBrewer)
+library(classInt)
+library(reproj)
+# library(maptools)
+# library(ggsn)
+library(matrixStats)
+library(ggpubr)
+library(BAMMtools)
+library(ggrepel)
+library(scales)
+library(ggpol)
+library(gghalves)
+library(gridExtra)
+library(NCmisc)  # for finding out which packages are being used in project
+library(Matrix)
+```
+
+
+## Data
+
+```{r}
+# loading Data required
+trafficzns <- st_read("Data/Geodaten/Verkehrszonen_Schweiz_NPVM_2017/Verkehrszonen_Schweiz_NPVM_2017_shp/Verkehrszonen_Schweiz_NPVM_2017.shp") %>% drop_na(N_AMR)
+
+# Read and clean the data
+NPVM_longmtrx <- read.csv("Data/Geodaten/Distanzmatrix/Reisezeit_Matrix_clnd.txt", sep="") %>%
+  drop_na() %>%
+  mutate(to = as.numeric(as.character(to)))
+```
+
+```{r}
+
+# Tibble to matrix and set diagonals to NA
+NPVM_mtrx <- acast(NPVM_longmtrx, from ~ to, value.var='distance')
+diag(NPVM_mtrx) <- NA
+
+# Check matrix symmetry
+isSymmetric(NPVM_mtrx)
+
+# Function to process distances and join with trafficzns
+process_distances <- function(data, city_code, city_data) {
+  data %>%
+    filter(from == city_code) %>%
+    left_join(trafficzns, by = c("to" = "ID")) %>%
+    st_as_sf() %>%
+    st_join(city_data, ., left = TRUE) %>%
+    group_by(ID) %>%
+    mutate(Distance = mean(distance, na.rm = TRUE)) %>%
+    slice_head(n = 1) %>%
+    st_set_geometry(NULL) %>%
+    as.data.frame()
+}
+
+# Process data for each city and write to CSV
+cities <- list(Geneva = 662101085, Zurich = 26101263, Bellinzona = 500201010)
+city_data <- list(Geneva = Geneva, Zurich = Zurich, Bellinzona = Bellinzona)
+paths <- c("Data/Data_Geneva/Geneva_Distances.csv", 
+           "Data/Data_Zurich/Zurich_Distances.csv", 
+           "Data/Data_Bellinzona/Bellinzona_Distances.csv")
+
+for (i in 1:length(cities)) {
+  city_name <- names(cities)[i]
+  combined_data <- process_distances(NPVM_longmtrx, cities[[i]], city_data[[i]])
+  write_csv(combined_data, paths[i])
+}
+```
+
+
+
